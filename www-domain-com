@@ -1,0 +1,178 @@
+
+### Support for ExpressionEngine 2.x ###
+### Edit lines under comments with [configure] ###
+ 
+## Rewrite rules to incorporate HTTPS connections  ##
+
+## boolean tests for building concatenated tests ##
+ 
+# request via GET
+set $get_req "0";
+if ($request_method ~ "GET") {
+    set $get_req "1";
+}
+ 
+# request via POST
+set $post_req "0";
+if ($request_method ~ "POST") {
+    set $post_req "1";
+}
+ 
+# request via https [configure to your HTTPS port]
+set $secure_req "0";
+if ($server_port = 443) {
+    set $secure_req "1";
+}
+ 
+# request is for root '/' with no query
+set $root_req_only "0";
+if ($request_uri ~ "^/$") {
+    set $root_req_only "1";
+}
+ 
+# request has query string
+set $query_req "0";
+if ($is_args = "?") {
+    set $query_req "1";
+}
+ 
+# request is for 'static' resource [configure]
+# NOTE: these are resources to be used by needs-to-be-secure areas
+set $static_resource "0";
+if ($uri ~* "\.(?:css|js|gif|jpe?g|png|svg|woff)$") {
+    set $static_resource "1";
+}
+ 
+# request contains index.php
+set $indexphp_req "0";
+if ($request_uri ~* "index\.php") {
+    set $indexphp_req "1";
+}
+ 
+# request contains needs-to-be-secure area [configure]
+# NOTE: 'system' directories need not be included, as they should be blocked (see below)
+set $secure_area "0";
+if ($request_uri ~* "^/(?:ee_wizard|checkout|dashboard)") {
+    set $secure_area "1";
+}
+ 
+# referer same domain, needs-to-be-secure area and via https [configure]
+# NOTE: the base domain needs to be hard-coded, as it is in a regex (no variable expansion support)
+set $secure_referer "0";
+if ($http_referer ~* "https://.*domain.com.*/(?:ee_wizard|dashboard|checkout).*") {
+    set $secure_referer "1";
+}
+ 
+# referer is needs-to-be-secure login or member area [configure]
+# NOTE: the base domain needs to be hard-coded, as it is in a regex (no variable expansion support)
+set $secure_member_referer "0";
+if ($http_referer ~* "https://.*domain.com.*/(?:checkout|dashboard).*") {
+    set $secure_member_referer "1";
+}
+ 
+## concatenated tests and redirects ##
+#  decide whether you want redirects to be 'permanent' (HTTP Status 301) 
+#  or 'last' (temp, HTTP Status 302) [configure below]
+ 
+# redirect old index.php requests (like from externally cached URLs, *before* removing index.php)
+# (this will not cause an infinite loop when rewriting index.php-less /segment/segment to /index.php/segment/segment
+#   because server block 'ifs' are read before any location block, and the 'last' rewrite for prepending index.php 
+#   to /segment/segment URLs skips this server block 'if' when internally redirecting, i.e. goes directly to
+#   'location ~* \.php')
+set $req "${get_req}${indexphp_req}";
+if ($req = "11") {
+    rewrite ^/index\.php/*(.*) $scheme://$host/$1? permanent;
+}
+ 
+# redirect needs-to-be-secure sections or pages to https
+set $req "${secure_req}${secure_area}";
+if ($req = "01") {
+    rewrite ^ https://$host$request_uri? permanent;
+}
+ 
+# allow actions (e.g. /?css=global_embeds/site_css.v.1305076786) if referenced from https page
+set $req "${secure_req}${query_req}${secure_area}${secure_referer}";
+if ($req = "0101") {
+    rewrite ^ https://$host$request_uri? permanent;
+}
+ 
+# skip '/' matches where posted data is sent to hidden 'index.php'
+#  (required for login/register notices)
+set $req "${secure_req}${root_req_only}${post_req}${secure_member_referer}";
+if ($req = "1111") {
+    break;
+}
+ 
+# redirect all needs-not-be-secure back to http
+# NOTE: careful that https resources/actions don't revert back to http
+#       (will stay https if linked-to resource has query)
+set $req "${secure_req}${query_req}${secure_area}${static_resource}";
+if ($req = "1000") {
+    rewrite ^ http://$host$request_uri? permanent;
+}
+ 
+## Block access to specific system and template areas ##
+ 
+# make admin tools accessible via specific IPs only [configure]
+location ~* "^/(?:ee_wizard|admin\.php)" {
+    # uncomment 'allow' and 'deny' and replace 'allow' with your IP address(es)
+#   allow 127.0.0.1;
+#   deny all;
+    
+    # see also: 'location ~* \.php' below
+    location ~* \.php { 
+        # NOTE: this redundant php config is necessary for access blocking, or
+        #       php files are served as-is, i.e. not interpreted by php process
+        
+        # include ee_fastcgi_params BEFORE fastcgi_pass
+        include incl.d/ee_fastcgi_params;
+        
+        # un/comment per connection method to standalone php process (only use one)
+        fastcgi_pass 127.0.0.1:9000;
+        #fastcgi_pass unix:/etc/php5/fpm/sockets/my-domain-com.sock;
+    }
+}
+ 
+# following match similar to .htaccess files with 'deny from all'
+ 
+# block direct access to system folder (if in www space) [configure]
+# NOTE: rewrite my-system-dir-name to your custom name
+location ~* "^/(?:my-system-dir-name|system)" {
+    deny all;
+}
+ 
+# block direct access to specific site 'internal include-only' theme resources [configure]
+# NOTE: this is setup for the way the demo ee site is config'd... yours may vary
+location ~* "^/themes/site_themes/.*/(?:.+\.group|snippets|global_variables)/" {
+    deny all;
+}
+ 
+## Pass regular /index.php/segment/... and other php scripts to php ##
+ 
+# requires 'try_files $uri $uri/ @eefrontend;' in location block
+#  (usually 'location /') in main server config
+location @eefrontend {
+    # internal rewrite /segment/segment/... to /index.php/segment/...
+    rewrite ^ /index.php$request_uri? last;
+}
+ 
+# see also: 'location ~* \.php' above
+location ~* \.php {
+    # NOTE: regex is not \.php$, this allows for ee_wizard to work
+    #  and other segmented URLs like: /segment/file.php/segment/segment
+    
+    # secure uploads dir, see: http://wiki.nginx.org/PHPFcgiExample,
+    #  uploads (or its parent) directory name [configure]
+    # NOTE: this does not need to be in config for nested 'location ~* \.php'
+    #       in specific-IPs access to admin tools above
+    if ($uri ~* "^/images/") {
+        return 403;
+    }
+ 
+    # include ee_fastcgi_params BEFORE fastcgi_pass
+    include /etc/nginx/incl.d/ee_fastcgi_params;
+    
+    # un/comment per connection method to standalone php process (only use one)
+    fastcgi_pass 127.0.0.1:9000;
+    #fastcgi_pass unix:/etc/php5/fpm/sockets/my-domain-com.sock;
+}
